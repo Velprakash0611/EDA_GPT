@@ -38,6 +38,7 @@ from chromadb.config import Settings
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
+from typing import Optional, Tuple
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -62,16 +63,16 @@ init_nltk_resources()
 
 # Streamlit compatibility wrapper
 def streamlit_safe(func):
+    @wraps(func)
     def wrapper(*args, **kwargs):
         try:
-            import streamlit as st
             return func(*args, **kwargs)
-        except ModuleNotFoundError:
-            import logging
-            logging.warning("Streamlit not available, skipping makevectorembeddings")
-            return None, None  # ✅ Return tuple even on failure
+        except NameError as e:
+            if "st" in str(e):
+                logger.warning(f"Streamlit not available, skipping {func.__name__}")
+                return lambda x: None  # Return no-op for spinners/warnings
+            raise
     return wrapper
-
 
 class VectorStore:
     def __init__(self, directory=None, use_streamlit=True, **kwargs):
@@ -95,48 +96,83 @@ class VectorStore:
         if self.directory:
             self.unstructured_directory_path = self.directory
 
-
-    def get_embedding_function(self, embedding_num=0):
+    def get_embedding_function(self, embedding_num=1):
         """Helper to initialize embedding functions with robust secret handling."""
+
         def get_secret(key, env_var):
             secret = st.secrets.get(key, "") if self.use_streamlit else ""
-            return secret or os.getenv(env_var) or (lambda: (_ for _ in ()).throw(
-                ValueError(f"Missing {env_var} in environment or Streamlit secrets")
-            ))()
+            env_secret = secret or os.getenv(env_var)
+            if not env_secret:
+                raise ValueError(f"Missing {env_var} in environment or Streamlit secrets")
+            return env_secret
 
-        embedding_options = {
-            0: HuggingFaceInferenceAPIEmbeddings(
-                api_key=get_secret("HUGGINGFACEHUB_API_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
-                model_name="BAAI/bge-base-en-v1.5",
-            ),
-            1: GoogleGenerativeAIEmbeddings(
-                model="models/embedding-001",
-                google_api_key=get_secret("GOOGLE_GEMINI_API", "GOOGLE_API_KEY"),
-            ),
-            2: HuggingFaceHubEmbeddings(
-                huggingfacehub_api_token=get_secret("HUGGINGFACEHUB_API_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
-            ),
-            3: OpenAIEmbeddings(
-                api_key=get_secret("OPENAI_API_KEY", "OPENAI_API_KEY"),
-            ),
-            4: GPT4AllEmbeddings(),
-        }
-        embeddings = embedding_options.get(embedding_num)
-        if embeddings is None:
-            logger.warning(f"Invalid embedding_num={embedding_num}, defaulting to GoogleGenerativeAI")
-            embeddings = embedding_options[1]
-        self.embedding_type = embedding_num
-        logger.info(f"Using embeddings: {embeddings.__class__.__name__}")
-        return embeddings
+        try:
+            embedding_options = {
+                0: HuggingFaceInferenceAPIEmbeddings(
+                    api_key=get_secret("HUGGINGFACEHUB_API_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
+                    model_name="BAAI/bge-base-en-v1.5",
+                ),
+                1: GoogleGenerativeAIEmbeddings(
+                    model="models/embedding-001",
+                    google_api_key=get_secret("GOOGLE_GEMINI_API", "GOOGLE_API_KEY"),
+                ),
+                2: HuggingFaceHubEmbeddings(
+                    huggingfacehub_api_token=get_secret("HUGGINGFACEHUB_API_TOKEN", "HUGGINGFACEHUB_API_TOKEN"),
+                ),
+                3: OpenAIEmbeddings(
+                    api_key=get_secret("OPENAI_API_KEY", "OPENAI_API_KEY"),
+                ),
+                4: GPT4AllEmbeddings(),
+            }
+
+            embeddings = embedding_options.get(embedding_num)
+            if embeddings is None:
+                logger.warning(f"Invalid embedding_num={embedding_num}, defaulting to GoogleGenerativeAI")
+                embeddings = embedding_options[1]
+
+            self.embedding_type = embedding_num
+            logger.info(f"Using embeddings: {embeddings.__class__.__name__}")
+            return embeddings
+
+        except Exception as e:
+            logger.error(f"❌ Error initializing embedding function: {e}")
+            raise
+
 
     @streamlit_safe
-    def makevectorembeddings(self, key=None, embedding_num=1, use_semantic_chunker=False, **kwargs):
+    def makevectorembeddings(
+        self, key: Optional[str] = None, embedding_num: int = 1, 
+        use_semantic_chunker: bool = False, **kwargs
+    ) -> Tuple[Chroma, BM25Retriever]:
         try:
+            import shutil
+            import uuid
+            import time
+            import subprocess
+            import platform
+            from langchain_chroma import Chroma
+            from chromadb.config import Settings
+
+            persist_directory = "./chroma_db"
+
+            def safe_delete(path):
+                if os.path.exists(path):
+                    try:
+                        if platform.system() == "Windows":
+                            subprocess.call(['cmd', '/c', 'rmdir', '/S', '/Q', path])
+                        else:
+                            shutil.rmtree(path)
+                        logger.info(f"🧹 Cleared existing Chroma directory: {path}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error deleting directory {path}: {e}")
+
+            safe_delete(persist_directory)
+
             if not self.directory and key is None:
-                with st.spinner("Searching for structure in the data"):
+                with st.spinner("🔎 Searching for structure in the data..."):
                     self._preprocess_data_in_directory()
 
-            with st.spinner("Loading data as text"):
+            with st.spinner("📅 Loading data as text..."):
                 text_loader = DirectoryLoader(
                     self.unstructured_directory_path, glob="*.txt", show_progress=True
                 )
@@ -151,60 +187,88 @@ class VectorStore:
                 else:
                     self.data = text_loader.load()
 
+            self.data = [doc for doc in self.data if doc.page_content.strip()]
             if not self.data:
-                raise ValueError("No data loaded. Cannot proceed with embeddings.")
+                raise ValueError("❌ No valid documents loaded. Cannot proceed with embeddings.")
 
             embeddings = self.get_embedding_function(embedding_num)
-            persist_directory = "./chroma_db"
-            if self.directory is None:
-                # UNSTRUCTURED DATA
-               
-                collection_name = f"collection_{int(time.time())}"
+            collection_name = f"collection_{int(time.time())}_{uuid.uuid4().hex}"
 
-                with st.spinner("Creating chunks"):
+            settings = Settings(
+                persist_directory=persist_directory,
+                anonymized_telemetry=False
+            )
+
+            if self.directory is None:
+                with st.spinner("🔧 Creating chunks for unstructured data..."):
                     chunks = self.create_chunks_for_parallel_processing(self.data, use_semantic_chunker)
                     list_of_docs = self.documents_from_chunks(text_chunks=chunks)
+                    list_of_docs = [doc for doc in list_of_docs if doc and doc.page_content.strip()]
 
-                with st.spinner("Creating embeddings and adding to Chroma"):
-                    self.vector_stores = Chroma.from_documents(
-                        documents=list_of_docs,
-                        embedding=embeddings,
-                        persist_directory=persist_directory,
-                        collection_name=collection_name,
-                    )
+                    if not list_of_docs:
+                        logger.error("❌ No valid documents to embed. Aborting Chroma creation.")
+                        raise ValueError("No valid documents found to embed.")
 
-                with st.spinner("Creating BM25 retriever"):
+                    logger.debug(f"📊 Total documents to embed: {len(list_of_docs)}")
+
+                with st.spinner("📌 Creating embeddings and adding to Chroma..."):
+                    try:
+                        logger.info("🚀 Creating Chroma vector store...")
+                        logger.debug(f"📁 Collection: {collection_name}, Docs: {len(list_of_docs)}")
+                        self.vector_store = Chroma.from_documents(
+                            documents=list_of_docs,
+                            embedding=embeddings,
+                            persist_directory=persist_directory,
+                            collection_name=collection_name,
+                            client_settings=settings
+                        )
+                        logger.info("✅ Chroma vector store created successfully.")
+                    except Exception as e:
+                        logger.error(f"🔥 Error during Chroma creation: {str(e)}", exc_info=True)
+                        raise
+
+                with st.spinner("📚 Creating BM25 retriever..."):
                     bm25_retriever = BM25Retriever.from_documents(list_of_docs)
 
-                # Logging before returning the tuple
-                logger.info(f"Returning vector store and BM25 retriever: {self.vector_stores}, {bm25_retriever}")
-                return self.vector_stores, bm25_retriever
+                return self.vector_store, bm25_retriever
 
             else:
-                # STRUCTURED DATA
                 text_splitter = RecursiveCharacterTextSplitter(
                     chunk_size=2000, chunk_overlap=100, length_function=len
                 ) if not use_semantic_chunker else SemanticChunker(embeddings)
+
                 chunks = text_splitter.split_documents(documents=self.data)
 
+                for i, doc in enumerate(self.data[:5]):
+                    logger.debug(f"📄 Original doc {i}: {doc.page_content[:200]}")
+
                 if not chunks:
-                    raise ValueError("No document chunks created for structured data.")
+                    logger.error("❌ No document chunks created for structured data.")
+                    raise ValueError("No document chunks were created.")
 
-                logger.info("Creating ChromaDB for structured data")
-                self.vector_stores = Chroma.from_documents(
-                    documents=chunks,
-                    embedding=embeddings,
-                    collection_name=f"collection_{int(time.time())}",
-                    persist_directory=persist_directory
-                )
+                try:
+                    logger.info("🚀 Creating ChromaDB for structured data")
+                    logger.debug(f"📁 Collection: {collection_name}, Chunks: {len(chunks)}")
+                    self.vector_store = Chroma.from_documents(
+                        documents=chunks,
+                        embedding=embeddings,
+                        persist_directory=persist_directory,
+                        collection_name=collection_name,
+                        client_settings=settings
+                    )
+                    logger.info("✅ Chroma vector store created successfully.")
+                except Exception as e:
+                    logger.error(f"🔥 Error during Chroma creation: {str(e)}", exc_info=True)
+                    raise
+
                 bm25_retriever = BM25Retriever.from_documents(chunks)
+                return self.vector_store, bm25_retriever
 
-                # Logging before returning the tuple
-                logger.info(f"Returning vector store and BM25 retriever: {self.vector_stores}, {bm25_retriever}")
-                return self.vector_stores, bm25_retriever
-
+        except ValueError as ve:
+            logger.error(f"🚨 ValueError in makevectorembeddings: {str(ve)}")
+            raise
         except Exception as e:
-            logger.error(f"Error in makevectorembeddings: {str(e)}")
+            logger.error(f"🔥 General error in makevectorembeddings: {str(e)}", exc_info=True)
             raise
 
 

@@ -1,10 +1,11 @@
 from langchain.agents import create_react_agent,AgentExecutor
 from langchain.prompts import ChatPromptTemplate, PromptTemplate, HumanMessagePromptTemplate
 from datetime import datetime
+import os
 import time
 import json
 from typing import Dict, List
-from langchain_core.pydantic_v1 import BaseModel, Field
+#  from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers.openai_functions import JsonOutputFunctionsParser
 import re
@@ -13,7 +14,9 @@ import time
 from crewai import Task,Agent,Crew
 import json
 from typing import Dict, List, Tuple
-from langchain_core.pydantic_v1 import BaseModel, Field
+#  from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
+
 from textwrap import dedent
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.utils.function_calling import convert_to_openai_function

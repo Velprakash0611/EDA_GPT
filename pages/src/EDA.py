@@ -1,12 +1,15 @@
 import numpy as np
 import pandas as pd
 import re
-import os, sys, io
+import os
+import sys, io
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
 from langchain.prompts import PromptTemplate, ChatPromptTemplate,HumanMessagePromptTemplate, SystemMessagePromptTemplate
 from langchain_community.utils.openai_functions import (
     convert_pydantic_to_openai_function,
 )
-from langchain_core.pydantic_v1 import BaseModel, Field
+#  from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from langchain_core.prompts import PromptTemplate
 from langchain_experimental.smart_llm import SmartLLMChain
 from queue import Queue
@@ -40,7 +43,8 @@ import sys
 from crewai import Agent,Task,Crew
 import pygwalker as pyg
 from pages.src.Tools.secrets import initialize_states  # Import the function
-
+from chromadb import Client
+from chromadb.config import Settings
 
 
 class CodeFormatter(BaseModel):
@@ -68,8 +72,8 @@ class EDAAnalyzer:
         self.value_counts = {}
         self.result_queue=Queue()
         self.vector_store=VectorStore(directory=self.config_data['relational_vstore'])
-        # if 'loaded_vstore' not in st.session_state:
-        #     st.session_state.loaded_vstore=None
+       # if 'loaded_vstore' not in st.session_state:
+        #    st.session_state.loaded_vstore=None
         self.llm_category=kwargs['llm_category']
         init_streamlit_comm()
         # self.initialEDA= None
@@ -100,25 +104,31 @@ class EDAAnalyzer:
         if not vstore or not hasattr(vstore, "as_retriever"):
             logging.warning("⚠️ loaded_vstore missing or invalid, regenerating vector store...")
 
-            if hasattr(self, "vector_store") and self.vector_store:
-                try:
-                    logging.info("Attempting to regenerate vector store...")
-                    vector_store, bm25_retriever = self.vector_store.makevectorembeddings(
-                        embedding_num=st.session_state.embeddings
-                    )
-                    if vector_store is None or not hasattr(vector_store, "as_retriever"):
-                        raise RuntimeError("Regenerated vector store is still invalid.")
+            try:
+                embedding_num = st.session_state.get("embeddings", 1)
+                logging.info("🔄 Attempting to regenerate vector store with embedding_num=%s...", embedding_num)
 
-                    st.session_state.loaded_vstore = vector_store
-                    st.session_state.bm25_retriever = bm25_retriever
-                    logging.info("✅ Vector store regenerated and stored in session.")
-                    return vector_store
-                except Exception as e:
-                    logging.error(f"❌ Failed to regenerate vector store: {e}")
-                    return None
-            else:
-                logging.error("❌ vector_store attribute is not set on the class.")
+                # ✅ Call directly from this class, not on self.vector_store
+                vector_store, bm25_retriever = self.vector_store.makevectorembeddings(
+                    embedding_num=embedding_num
+                )
+
+                if vector_store is None or not hasattr(vector_store, "as_retriever"):
+                    logging.error(f"Returned vector_store is invalid. Type: {type(vector_store)}, dir: {dir(vector_store)}")
+                    raise RuntimeError("Regenerated vector store is still invalid.")
+
+                # Store in session state
+                st.session_state.loaded_vstore = vector_store
+                st.session_state.bm25_retriever = bm25_retriever
+
+                logging.info("✅ Vector store regenerated and stored in session.")
+                return vector_store
+
+            except Exception as e:
+                logging.exception("❌ Failed to regenerate vector store:")
                 return None
+
+        logging.debug(f"✅ Final vector store returned from ensure_vector_store: {vstore}")
         return vstore
 
 
@@ -189,93 +199,54 @@ class EDAAnalyzer:
         try:
             generated_code = self._format_code(generated_code)
 
+            # Check if the generated code contains a description (non-executable)
+            if not generated_code.strip().startswith("import") and not generated_code.strip().startswith("result"):
+                logging.warning(f"Generated code is not executable Python code: {generated_code}")
+                # Directly return the descriptive output and make sure it's returned as part of the answer
+                return (True, generated_code)
+
+            # Define the class and functions to capture prints (same as before)
             class CapturePrints:
                 def __init__(self):
                     self.outputs = []
 
                 def write(self, msg):
-                    if msg.strip():  # Ignore empty messages
+                    if msg.strip():
                         self.outputs.append(msg.strip())
 
                 def flush(self):
-                    pass  # No need to implement this for capturing
+                    pass
 
-            # Override the print function to capture each print statement
+                def get_output(self):
+                    return "\n".join(self.outputs)
+
             def custom_print(*args, **kwargs):
                 output = ' '.join(map(str, args))
                 captured_prints.write(output)
 
-            # Setup restricted globals and locals
-            restricted_globals = {'df': self.data, 'print': custom_print}
+            restricted_globals = {'df': self.data, 'print': custom_print, 'os': os}
             restricted_locals = {}
 
-            # Clear old plots before executing new code
+            # Clear old plots
             plot_dir = os.path.join('pages', 'src', 'Database', 'Plots')
             if os.path.exists(plot_dir):
                 for f in os.listdir(plot_dir):
                     if f.endswith(('.png', '.jpg', '.jpeg', '.svg')):
                         os.remove(os.path.join(plot_dir, f))
 
-            # Capture prints
             captured_prints = CapturePrints()
 
             # Execute the generated code
             exec(generated_code, restricted_globals, restricted_locals)
 
             result_value = restricted_locals.get('result')
-
             if not isinstance(result_value, tuple):
                 result_value = (result_value,)
 
-            # Combine the result variable and captured prints into a single tuple
-            answer = result_value + tuple(captured_prints.outputs)
+            # Combine result with captured prints
+            answer = result_value + (captured_prints.get_output(),)
 
-            logging.info(f'formatted_generated_code , answer: {generated_code}, {answer}')
-            return (True, answer, generated_code)
-
-        except Exception as e:
-            logging.error(f"Error executing generated code: {e}")
-            return (False, str(e))
-
-
-    def executeGenerated_code(self,generated_code):
-        try:
-            generated_code = self._format_code(generated_code)
-            class CapturePrints:
-                def __init__(self):
-                    self.outputs = []
-
-                def write(self, msg):
-                    if msg.strip():  # Ignore empty messages
-                        self.outputs.append(msg.strip())
-
-                def flush(self):
-                    pass  # No need to implement this for capturing
-
-            # Override the print function to capture each print statement
-            def custom_print(*args, **kwargs):
-                output = ' '.join(map(str, args))
-                captured_prints.write(output)
-
-            # Setup restricted globals and locals
-            restricted_globals = {'df': self.data, 'print': custom_print}
-            restricted_locals = {}
-            
-            # Capture prints
-            captured_prints = CapturePrints()
-            
-            # Execute the generated code
-            exec(generated_code, restricted_globals, restricted_locals)
-            
-            result_value = restricted_locals.get('result')
-            
-            if not isinstance(result_value, tuple):
-                result_value = (result_value,)
-            
-            # Combine the result variable and captured prints into a single tuple
-            answer = result_value + tuple(captured_prints.outputs)
-
-            logging.info(f'formatted_generated_code , answer: {generated_code}, {answer}')
+            logging.info(f'Formatted generated code, answer: {generated_code}, {answer}')
             return (True, answer, generated_code)
 
         except Exception as e:
@@ -302,37 +273,55 @@ class EDAAnalyzer:
         
         return f'''{formatted_code}'''
 
-    def _format_code(self,code : str):
 
-        if 'python' in code:
-            code=((code.replace('python','')).strip('```')).strip()
+
+    def _format_code(self, code: str):
+        # Clean up code: remove the markdown backticks and optional "python" at the start
+        code = code.strip()
+
+        # Remove markdown triple backticks (```) and optional "python"
+        if code.startswith("```"):
+            code_lines = code.splitlines()
+            if code_lines[0].strip().startswith("```"):
+                code_lines = code_lines[1:]  # Remove the first line with backticks
+            if code_lines and code_lines[-1].strip().endswith("```"):
+                code_lines = code_lines[:-1]  # Remove the last line with backticks
+            code = "\n".join(code_lines)
+
+        # Remove the "python" language specifier if present
+        code = code.replace("```", "").replace("python", "").strip()
+
+        # Remove any lines containing "df = pd" or similar patterns
         lines = code.split("\n")
         lines = [line for line in lines if "df = pd" not in line and "df=pd" not in line]
         semi_formatted_code = "\n".join(lines)
 
-        if semi_formatted_code.count('result=')>1 or semi_formatted_code.count('result =')>1:
+        # Check if the code contains more than one 'result=' assignment
+        if semi_formatted_code.count('result=') > 1 or semi_formatted_code.count('result =') > 1:
             return f'''{semi_formatted_code}'''
+
+        # If 'result' is present but no imports, we return the code as it is
         if 'import' not in semi_formatted_code and 'result' in semi_formatted_code:
             return f'''{semi_formatted_code}'''
-        # print(semi_formatted_code)
-        code_block_pattern=r"```(.*?)```"
-        code_block_pattern=r"(import[\s\S]*?)(result\s*=\s*[\s\S]+?)(?=(import|result|$))"
-        matches=re.findall(code_block_pattern,semi_formatted_code)
 
-        # code_blocks = [block for block in re.findall(code_block_pattern,semi_formatted_code)]
-        result=[]
-        print(len(matches))
-        # print(matches[0])
+        # Regex pattern to capture import block and result assignment block
+        code_block_pattern = r"(import[\s\S]*?)(result\s*=\s*[\s\S]+?)(?=(import|result|$))"
+        matches = re.findall(code_block_pattern, semi_formatted_code)
+
+        # If no matches are found, return the code as it is
+        if not matches:
+            return semi_formatted_code
+
+        # Process the matched blocks
+        result = []
         for code_blocks in matches:
             result.append(self.handle_single_code_block(code_blocks))
-        # return handle_single_code_block(matches=matches[0])
 
-        formatted_code='\n'.join(result)
-
-        
-        
+        # Combine the formatted blocks and return the final formatted code
+        formatted_code = '\n'.join(result)
 
         return f'''{formatted_code}'''
+
 
 
     def _promptformatter(self):
@@ -466,6 +455,7 @@ class EDAAnalyzer:
         except Exception as e:
             logging.error(f"Unexpected error in pandasaichattool: {e}")
             return ('Error', str(e))
+
 
     def EDAAgent(self, extra_questions=None):
         template = self.prompt_data['Structured Prompts']['eda_gpt_analysis']['role']

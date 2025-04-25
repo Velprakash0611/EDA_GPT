@@ -39,6 +39,22 @@ def home():
     st.write("- Make sure your dataset does not contain any sensitive or confidential information.")
     st.write("- For optimal performance, use datasets with a reasonable number of rows and columns.")
 
+    # Contributors Section
+    st.header("Contributors:")
+
+    # List of contributors and their profile links
+    contributors = [
+        {"name": "Velprakash. S", "profile_link": "https://github.com/Velprakash0611"},
+        {"name": "Tarun. A", "profile_link": "https://github.com/Tajaar"},
+        {"name": "Sriram. R", "profile_link": "http://www.linkedin.com/in/sriram-r-1a93ab232"},
+        # Add more contributors as needed
+    ]
+
+    # Display contributors one by one with profile links
+    for contributor in contributors:
+        st.write(f"- [{contributor['name']}]({contributor['profile_link']})")
+
+
     # Feedback and Support Section
     st.header("Feedback and Support:")
     st.write("If you have any feedback, suggestions, or need assistance, feel free to reach out to us. We're here to help you make the most of your data analysis experience.")
@@ -46,6 +62,8 @@ def home():
     # Disclaimer Section
     st.header("Disclaimer:")
     st.write("This tool is designed to aid the exploratory data analysis process and should not replace human judgment. It should be used by a human and should not be relied upon blindly.")
+
+
 
     # Thank You Section
     st.header("Thank you for using the EDA Assistant App!")

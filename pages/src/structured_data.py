@@ -1,8 +1,10 @@
 import streamlit as st
+import os
 from pages.src.EDA import EDAAnalyzer
 import streamlit.components.v1 as components
 from streamlit_extras import colored_header
-import os
+
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
 import pandas as pd
 import logging
 import json
@@ -10,6 +12,8 @@ import io
 from io import StringIO
 from streamlit_option_menu import option_menu
 from pages.src.automl.fengineering import Automl
+import sys
+import types
 
 
 class EDAGPT:

@@ -16,11 +16,11 @@ from langchain_community.tools.wikipedia.tool import WikipediaQueryRun
 from langchain_community.utilities.wikipedia import WikipediaAPIWrapper
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi
-from langchain_core.pydantic_v1 import BaseModel, Field
+#  from langchain_core.pydantic_v1 import BaseModel, Field
 import streamlit as st
 import math
 import functools
-
+from pydantic import BaseModel, Field
 
 TOOL_USAGE_LIMIT={'SEARCH_API':3}
 tool_usage_counter={'SEARCH_API':0}

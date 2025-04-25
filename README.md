@@ -11,8 +11,6 @@ Welcome to EDA GPT, your comprehensive solution for all your data analysis needs
 ### Introduction
 EDA GPT streamlines the data analysis process, allowing users to effortlessly explore, visualize, and gain insights from their data. With a user-friendly interface and powerful features, EDA GPT empowers users to make data-driven decisions with confidence.
 
-#### DEMO VIDEO : https://genny.lovo.ai/share/d6b58f0d-fc46-4aa7-a65e-fa0f9a684f01
-
 
 
 ### Getting Started

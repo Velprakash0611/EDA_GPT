@@ -1,11 +1,13 @@
 import streamlit as st
+import os, json, time
 from pages.src.setup import DataFrameEnvironment, DataManager
 from pages.src.unstructured_data import unstructured_Analyzer
 from pages.src.Instructions.instructions import instructions
 from pages.src.Tools.scraper import extractollamamodels
 from pages.src.structured_data import EDAGPT
 from pages.src.Tools.secrets import initialize_secrets, initialize_states
-import os, json, time
+
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
 from streamlit_option_menu import option_menu
 
 st.set_page_config(page_title="Analyze data", layout='wide')

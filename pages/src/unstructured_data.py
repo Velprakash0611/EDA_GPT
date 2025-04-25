@@ -1,7 +1,15 @@
+import os, inspect, types
 import streamlit as st
 import traceback
 import shutil
 import json, os
+os.environ["CHROMA_TELEMETRY_ENABLED"] = "False"
+
+# Disable TensorFlow in transformers
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+os.environ["TRANSFORMERS_NO_PYTORCH"] = "0"
+
 from datetime import datetime
 from .vstore import VectorStore
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder, HumanMessagePromptTemplate,PromptTemplate
@@ -14,7 +22,7 @@ import sys , re
 from concurrent.futures import ThreadPoolExecutor
 from crewai import Agent,Task,Crew
 from langchain.tools import tool
-import os, inspect, types
+
 from streamlit_extras import colored_header
 from pages.src.Tools.llms import get_llm
 from langchain.chains.retrieval import create_retrieval_chain
@@ -24,7 +32,7 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from streamlit_extras.dataframe_explorer import dataframe_explorer
 from pages.src.Tools.langroupchain_custom import LangGroupChain
 from langchain.vectorstores.base import VectorStoreRetriever
-from langchain.chains.llm import LLMChain
+#from langchain.chains.llm import LLMChain
 import pdfplumber
 import pandas as pd
 import assemblyai as aai
@@ -36,9 +44,16 @@ from bson import ObjectId
 from chromadb import PersistentClient  # Correct import
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_community.embeddings import OpenAIEmbeddings
-from langchain.embeddings import HuggingFaceEmbeddings  # ✅ Use Hugging Face Embeddings
+#from langchain.embeddings import HuggingFaceEmbeddings  # ✅ Use Hugging Face Embeddings
+#from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+#from langchain.embeddings import HuggingFaceEmbeddings
+#from langchain.chains import retrieval_qa
+from langchain.chains.retrieval_qa.base import RetrievalQA
+
+from langchain_chroma import Chroma
 from langchain_groq import ChatGroq    # for Groq api
 from langchain.prompts import PromptTemplate
 from langchain.retrievers import MultiQueryRetriever, EnsembleRetriever
@@ -46,6 +61,7 @@ from langchain.schema import Document
 from langchain.schema.runnable import Runnable
 from langchain.vectorstores.base import VectorStoreRetriever  # ✅ Correct!
 from chromadb.config import Settings as ChromaSettings 
+from langchain_core.runnables import RunnableMap
 
 from .Tools.tools import (
     SEARCH_API,
@@ -59,8 +75,10 @@ from .Tools.tools import (
 from textwrap import dedent
 from joblib import load
 from dotenv import load_dotenv
+
+#from langchain.vectorstores import Chroma
 from langchain_community.vectorstores import Chroma
-from langchain.vectorstores import Chroma
+
 
 load_dotenv()
 import logging
@@ -140,8 +158,8 @@ class unstructured_Analyzer:
             return pd.DataFrame(tables[1:], columns=tables[0])  # Convert to DataFrame
         return None
 
-    def read_extracted_table():
-        table_path = os.path.join(_self.unstructured_directory, 'extracted_table.csv')
+    def read_extracted_table(self):
+        table_path = os.path.join(self.unstructured_directory, 'extracted_table.csv')
         if os.path.exists(table_path):
             return pd.read_csv(table_path).to_dict()
         return "No extracted table found."
@@ -174,93 +192,120 @@ class unstructured_Analyzer:
         logging.info(prediction_proba)
         return prediction_proba
 
-    @st.cache_resource
-    def _vstore_embeddings(_self, uploaded_files=None, mongo=False, _mongo_data=None):
+  #  @st.cache_resource
+    def _vstore_embeddings(self, uploaded_files=None, mongo=False, _mongo_data=None):
         if 'vectorstoreretriever' not in st.session_state:
             st.session_state['vectorstoreretriever'] = None
         if 'bm25retriever' not in st.session_state:
             st.session_state['bm25retriever'] = None
 
-        # ✅ Clear existing Chroma vector DB if new file is uploaded
-        if uploaded_files and os.path.exists("db"):
-            try:
-                shutil.rmtree("db")
-                logging.info("🧹 Old Chroma vector store directory 'db/' removed successfully.")
-            except Exception as e:
-                logging.error(f"⚠️ Error deleting vector store directory: {e}")
+        try:
+            # ✅ Clear existing Chroma vector DB if new file is uploaded
+            if uploaded_files and os.path.exists("db"):
+                try:
+                    shutil.rmtree("db", ignore_errors=False)
+                    logging.info("🧹 Old Chroma vector store directory 'db/' removed successfully.")
+                except Exception as e:
+                    logging.error(f"⚠️ Error deleting vector store directory: {e}")
 
-        # ✅ Delete unnecessary files except extracted tables
-        for file in os.listdir(_self.unstructured_directory):
-            file_path = os.path.join(_self.unstructured_directory, file)
-            if not file.endswith((".csv", ".json", ".txt")):
-                os.remove(file_path)
+            # ✅ Delete unnecessary files except extracted tables
+            for file in os.listdir(self.unstructured_directory):
+                file_path = os.path.join(self.unstructured_directory, file)
+                if not file.endswith((".csv", ".json", ".txt")):
+                    try:
+                        os.remove(file_path)
+                        logging.info(f"Deleted unnecessary file: {file}")
+                    except Exception as e:
+                        logging.error(f"⚠️ Failed to delete file {file}: {e}")
 
-        if uploaded_files:
-            file_type = uploaded_files.type.split('/')[1]
+            if uploaded_files:
+                file_type = uploaded_files.type.split('/')[1]
 
-            # ✅ Handle PDFs
-            if file_type == 'pdf':
-                pdf_path = os.path.join(_self.unstructured_directory, uploaded_files.name)
-                with open(pdf_path, 'wb') as f:
-                    f.write(uploaded_files.getbuffer())
-                logging.info(f'Saved PDF: {pdf_path}')
-
-                extracted_tables = _self.extract_tables_from_pdf(pdf_path)
-                if extracted_tables is not None and not extracted_tables.empty:
-                    table_path = os.path.join(_self.unstructured_directory, 'extracted_table.csv')
-                    extracted_tables.to_csv(table_path, index=False)
-                    logging.info(f'Extracted tables saved to: {table_path}')
-
-            # ✅ Handle Audio Files
-            elif file_type in ['mp3', 'mp4', 'mpeg4', 'mpeg']:
-                logging.info('Processing audio file...')
-                aai.settings.api_key = st.secrets['ASSEMBLYAI_API_KEY']['api_key']
-                with st.spinner('Collecting transcripts...'):
-                    audio_dir = _self.config_data['audio_dir']
-                    audio_file_path = os.path.join(audio_dir, uploaded_files.name)
-                    with open(audio_file_path, "wb") as f:
+                # ✅ Handle PDFs
+                if file_type == 'pdf':
+                    pdf_path = os.path.join(self.unstructured_directory, uploaded_files.name)
+                    with open(pdf_path, 'wb') as f:
                         f.write(uploaded_files.getbuffer())
+                    logging.info(f'Saved PDF: {pdf_path}')
 
-                    transcriber = aai.Transcriber()
-                    transcript = transcriber.transcribe(audio_file_path)
+                    extracted_tables = self.extract_tables_from_pdf(pdf_path)
+                    if extracted_tables is not None and not extracted_tables.empty:
+                        table_path = os.path.join(self.unstructured_directory, 'extracted_table.csv')
+                        extracted_tables.to_csv(table_path, index=False)
+                        logging.info(f'Extracted tables saved to: {table_path}')
+                    else:
+                        logging.warning(f'No tables extracted from PDF: {pdf_path}')
 
-                transcript_path = os.path.join(_self.unstructured_directory, 'transcript.txt')
-                with open(transcript_path, 'w') as f:
-                    f.write(transcript.text)
+                # ✅ Handle Audio Files
+                elif file_type in ['mp3', 'mp4', 'mpeg4', 'mpeg']:
+                    logging.info('Processing audio file...')
+                    aai.settings.api_key = st.secrets['ASSEMBLYAI_API_KEY']['api_key']
+                    with st.spinner('Collecting transcripts...'):
+                        audio_dir = self.config_data['audio_dir']
+                        audio_file_path = os.path.join(audio_dir, uploaded_files.name)
+                        with open(audio_file_path, "wb") as f:
+                            f.write(uploaded_files.getbuffer())
 
-                logging.info(f'Transcript saved to: {transcript_path}')
-                for file in os.listdir(audio_dir):
-                    os.remove(os.path.join(audio_dir, file))
+                        transcriber = aai.Transcriber()
+                        transcript = transcriber.transcribe(audio_file_path)
 
-            # ✅ Generate embeddings
-            with st.spinner('Generating Embeddings. May take some time...'):
-                store, bm25 = st.session_state.vector_store.makevectorembeddings(
-                    embedding_num=st.session_state.embeddings
-                )
-                st.session_state.vectorstoreretriever = store
-                st.session_state.bm25retriever = bm25
-                print("🔍 Returned store & bm25:", store, bm25)
-                if store is None:
-                    logging.error("❌ Embedding creation failed — vector store is None!")
+                    transcript_path = os.path.join(self.unstructured_directory, 'transcript.txt')
+                    with open(transcript_path, 'w') as f:
+                        f.write(transcript.text)
 
-        # ✅ Handle MongoDB input
-        elif mongo:
-            file_path = os.path.join(_self.unstructured_directory, 'mongo_data.txt')
-            with open(file_path, 'w', encoding='utf-8') as file:
-                file.write(str(_mongo_data) + '\n')
+                    logging.info(f'Transcript saved to: {transcript_path}')
+                    for file in os.listdir(audio_dir):
+                        try:
+                            os.remove(os.path.join(audio_dir, file))
+                            logging.info(f"Deleted audio file: {file}")
+                        except Exception as e:
+                            logging.error(f"⚠️ Failed to delete audio file {file}: {e}")
 
-            with st.spinner('Generating Embeddings. Please wait...'):
-                store, bm25 = st.session_state.vector_store.makevectorembeddings(
-                    embedding_num=st.session_state.embeddings, key="mongo"
-                )
-                st.session_state.vectorstoreretriever = store
-                st.session_state.bm25retriever = bm25
-                print("🔍 Returned store & bm25 (mongo):", store, bm25)
-                if store is None:
-                    logging.error("❌ Embedding creation failed — vector store is None!")
+                # ✅ Generate embeddings
+                with st.spinner('Generating Embeddings. May take some time...'):
+                    store, bm25 = st.session_state.vector_store.makevectorembeddings(
+                        embedding_num=st.session_state.embeddings
+                    )
 
-        print('✅ vectorstoreretriever:', st.session_state.vectorstoreretriever)
-        return st.session_state.vectorstoreretriever
+                    # Ensure store is always a list
+                    if store is not None and not isinstance(store, list):
+                        store = [store]
+
+                    st.session_state.vectorstoreretriever = store
+                    st.session_state.bm25retriever = bm25
+                    logging.info(f"🔍 Returned store & bm25: {store}, {bm25}")
+                    if store is None:
+                        logging.error("❌ Embedding creation failed — vector store is None!")
+
+            # ✅ Handle MongoDB input
+            elif mongo:
+                file_path = os.path.join(self.unstructured_directory, 'mongo_data.txt')
+                with open(file_path, 'w', encoding='utf-8') as file:
+                    file.write(str(_mongo_data) + '\n')
+
+                with st.spinner('Generating Embeddings. Please wait...'):
+                    store, bm25 = st.session_state.vector_store.makevectorembeddings(
+                        embedding_num=st.session_state.embeddings, key="mongo"
+                    )
+
+                    # Ensure store is always a list
+                    if store is not None and not isinstance(store, list):
+                        store = [store]
+
+                    st.session_state.vectorstoreretriever = store
+                    st.session_state.bm25retriever = bm25
+                    logging.info("🔍 Returned store & bm25 (mongo):", store, bm25)
+                    if store is None:
+                        logging.error("❌ Embedding creation failed — vector store is None!")
+
+            logging.info(f'✅ vectorstoreretriever: {st.session_state.vectorstoreretriever}')
+
+            return st.session_state.vectorstoreretriever
+
+        except Exception as e:
+            logging.error(f"⚠️ Error in _vstore_embeddings: {e}")
+            return None
+
 
         
     def check_for_url(self,text):
@@ -271,8 +316,8 @@ class unstructured_Analyzer:
         else:
             return False
     def _promptformatter(self):
-        input_variables = ['context', 'input' , 'memory','extra_documents', 'date']
-        variables = """\nQUESTION: {input},\n
+        input_variables = ['context', 'query' , 'memory','extra_documents', 'date']
+        variables = """\nQUESTION: {query},\n
         Retrieved CONTEXT: {context},\n
         Retrieved DOCS: {extra_documents},\n
         MEMORY: {memory}\n
@@ -310,32 +355,56 @@ class unstructured_Analyzer:
                 ensemble_docs = ensemble_docs[:5]
         return ensemble_docs
     
-    def extract_high_similarity_documents(self,vector_store_retriever, query):
-        with st.spinner('searching for docs with high similarity threshold (0.7)'):
-            extra_data = vector_store_retriever.get_relevant_documents(query)
-            extradata = ''.join(ele.page_content + '\n' for ele in extra_data)
-        return extradata
-    
+    def extract_high_similarity_documents(self, vector_store_retriever, query, similarity_threshold=0.7):
+        try:
+            with st.spinner('Searching for docs with high similarity threshold (0.7)'):
+                # Retrieve documents based on the query
+                extra_data = vector_store_retriever.get_relevant_documents(query)
+                
+                # Filter documents based on similarity threshold
+                filtered_data = [
+                    ele for ele in extra_data
+                    if ele.metadata.get('similarity', 0) >= similarity_threshold
+                ]
+                
+                # Combine the filtered content into one string
+                extradata = ''.join(ele.page_content + '\n' for ele in filtered_data)
+                
+                if not extradata:
+                    logging.warning("⚠️ No documents found with sufficient similarity.")
+                
+                return extradata
+            
+        except Exception as e:
+            logging.error(f"❌ Error during document extraction: {str(e)}")
+            return f"❌ Error during document extraction: {str(e)}"
+
     def datanalystbot(self, query: str, context=" "):
         print("🧠 datanalystbot started")
 
         try:
+            # ✅ Get the LLM and prompt template
             llm = self._get_llm()
-            
-        # ✅ Get the prompt template
             prompt_template = self._promptformatter()
 
-        # ✅ Create LLMChain from prompt
-            prompt_chain = LLMChain(prompt=prompt_template, llm=llm)
+            # ✅ Create LLMChain from prompt
+           # prompt_chain = LLMChain(prompt=prompt_template, llm=llm)
+            prompt_chain = prompt_template | llm  # (RunnableSequence)
 
-        # ✅ Use the chain inside combine_docs_chain
-            combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=prompt_template)  # this now works correctly
-            #combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=self._promptformatter())
+
+            chroma_settings = ChromaSettings(
+                chroma_db_impl="duckdb+parquet",  # Ensure correct storage backends
+                persist_directory="db",
+                anonymized_telemetry=False, is_persistent=True
+            )
+
+            # ✅ Create the document chain
+            combine_docs_chain = create_stuff_documents_chain(llm=llm, prompt=prompt_template)
 
             # ✅ Ensure Hugging Face API token
             if "huggingfacehub_api_token" not in st.session_state:
                 st.session_state.huggingfacehub_api_token = st.secrets.get("HUGGINGFACEHUB_API_TOKEN", "")
-                print("🔑 Hugging Face token set")
+                logging.info("🔑 Hugging Face token set")
 
             # ✅ Initialize Hugging Face embeddings
             if "embedding_function" not in st.session_state:
@@ -345,85 +414,139 @@ class unstructured_Analyzer:
                         model_kwargs={'device': 'cpu'},
                         encode_kwargs={'normalize_embeddings': True},
                     )
-                    print("✅ Hugging Face Embeddings initialized")
+                    logging.info("✅ Hugging Face Embeddings initialized")
                 except Exception as embed_error:
-                    return f"❌ Failed to initialize embeddings:\n```\n{embed_error}\n```"
+                    logging.warning(f"⚠️ Failed to initialize Hugging Face embeddings: {str(embed_error)}")
+                    return f"❌ Failed to initialize embeddings: {embed_error}"
 
-            # ✅ Ensure vector retriever
-            vector_embeddings_retriever = None
+            # ✅ Ensure vector retriever is initialized correctly
             if "vectorstoreretriever" not in st.session_state or not st.session_state.vectorstoreretriever:
                 try:
                     vector_embeddings_retriever = self._vstore_embeddings(
-                        uploaded_files=st.session_state.get("uploaded_files", [])
-                    )[0]
-                    print("✅ Vector store retriever created from uploaded files")
-                    st.session_state.vectorstoreretriever = [vector_embeddings_retriever]
-                except Exception as store_error:
-                    return f"❌ Failed to initialize vector embeddings retriever:\n```\n{store_error}\n```"
-            else:
-                try:
-                    chroma_store = Chroma(
-                        collection_name="eda_gpt_collection",
+                        uploaded_files=st.session_state.get("uploaded_files", []),
                         persist_directory="db",
-                        embedding_function=st.session_state.embedding_function,
-                        client_settings=ChromaSettings(
-                            chroma_api_impl="chromadb.api.local.LocalAPI",
-                            persist_directory="db"
-                        )
-                    )
+                        client_settings=chroma_settings
+                    )[0]
 
+                    print(f"Initialized vector embeddings retriever: {vector_embeddings_retriever}")
 
-                    if chroma_store is None:
-                        logging.error("❌ Chroma() returned None.")
-                        raise ValueError("Chroma vector store could not be initialized.")
+                    if hasattr(vector_embeddings_retriever, "as_retriever"):
+                        retriever = vector_embeddings_retriever.as_retriever()
+                        logging.info("✅ Converted Chroma to retriever using .as_retriever()")
+                    else:
+                        retriever = vector_embeddings_retriever
+                        logging.warning("⚠️ Using retriever without .as_retriever()")
 
-                    # 👇 This is where the error comes from
-                    vector_embeddings_retriever = chroma_store.as_retriever()
+                    # ✅ Only set retriever if valid
+                    if hasattr(retriever, "get_relevant_documents"):
+                        st.session_state.vectorstoreretriever = [retriever]
+                        logging.info(f"✅ Vector store retriever created: {st.session_state.vectorstoreretriever}")
+                    else:
+                        logging.error("❌ Retriever missing `get_relevant_documents()` method!")
+                        return "❌ Error: Retriever does not implement `get_relevant_documents()`"
 
-                    st.session_state.vectorstoreretriever = [vector_embeddings_retriever]
+                except Exception as store_error:
+                    logging.error(f"❌ Failed to initialize vector embeddings retriever: {str(store_error)}")
+                    return f"❌ Failed to initialize vector embeddings retriever:\n{store_error}"
 
+            # ✅ Check if vectorstoreretriever is a list after initialization
+            vectorstore = st.session_state.get("vectorstoreretriever", [])
+
+            if not isinstance(vectorstore, list):
+                logging.error(f"❌ vectorstoreretriever is not a list: {type(vectorstore)}")
+                return f"❌ Error: vectorstoreretriever is not a list. It is of type {type(vectorstore)}"
+
+            # 🔍 Force conversion to retriever using .as_retriever() if needed
+            retrievers = []
+            for vs in vectorstore:
+                try:
+                    if hasattr(vs, "as_retriever"):
+                        r = vs.as_retriever(search_type="similarity")
+                    else:
+                        r = vs  # fallback, though rare
+
+                    if hasattr(r, "get_relevant_documents"):
+                        retrievers.append(r)
+                    else:
+                        logging.warning(f"⚠️ Object does not have get_relevant_documents: {type(r)}")
                 except Exception as e:
-                    logging.error(f"❌ Error loading vector store retriever: {e}")
-                    raise ValueError("Failed to initialize vector embeddings retriever.")
+                    logging.error(f"❌ Failed to convert vector store to retriever: {e}")
 
-
-            # ✅ Check retrievers
-            retrievers = [r for r in st.session_state.vectorstoreretriever if hasattr(r, "get_relevant_documents")]
+            # ❌ If no valid retrievers found, abort
             if not retrievers:
+                logging.error(f"No valid retrievers found in session state: {vectorstore}")
+                print("Empty retrievers list:", retrievers)
                 return "❌ Error: No valid retrievers found for EnsembleRetriever!"
 
+            # ✅ Initialize ensemble retriever
             weights = [1.0 / len(retrievers)] * len(retrievers)
             ensemble_retriever = EnsembleRetriever(retrievers=retrievers, weights=weights)
-            print(f"📦 Ensemble retriever initialized with {len(retrievers)} retrievers")
+            logging.info(f"📦 Ensemble retriever initialized with {len(retrievers)} retrievers")
 
-            # ✅ Parallel document fetching
+
+            # ✅ Parallel document fetching with extended timeout
             with ThreadPoolExecutor() as executor:
                 mqdocs_future = executor.submit(self.extract_multiquery_documents, ensemble_retriever, query)
                 ensemble_docs_future = executor.submit(self.extract_ensemble_documents, ensemble_retriever, query)
                 extra_data_future = executor.submit(self.extract_high_similarity_documents, retrievers[0], query)
 
-            mqdocs = mqdocs_future.result()
-            ensemble_docs = ensemble_docs_future.result()
-            extradata = extra_data_future.result()
+                try:
+                    # Increase timeout to 60 seconds to handle longer processing
+                    mqdocs = mqdocs_future.result(timeout=60)
+                    ensemble_docs = ensemble_docs_future.result(timeout=60)
+                    extradata = extra_data_future.result(timeout=60)
+                except Exception as e:
+                    logging.error(f"❌ Error during parallel document extraction: {str(e)}")
+                    return f"❌ Error during parallel document extraction: {str(e)}"
 
+            # Combine documents
             combinedocs = mqdocs + [Document(page_content=extradata)] + ensemble_docs
-            retrieval_chain = create_retrieval_chain(retrievers[0], combine_docs_chain)
 
-            result = retrieval_chain.invoke({
-                'input': query,
-                'context': context or " ",
-                'memory': st.session_state.messages[::-1][:3],
-                'date': datetime.today().strftime('%Y-%m-%d %H:%M:%S'),
-                'extra_documents': combinedocs
-            })
+            # Chain to format input and run LLM with the prompt
+            document_chain = (
+                RunnableMap({
+                    "context": lambda x: "\n\n".join([doc.page_content for doc in x["documents"]]),
+                    "query": lambda x: x["query"],
+                    "memory": lambda x: x.get("memory", ""),
+                    "extra_documents": lambda x: x.get("extra_documents", ""),
+                    "date": lambda x: x.get("date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                })   |  prompt_template  | llm
+            )
 
-            st.session_state.docs_found = result['context'] + combinedocs
-            return result['answer']
+            # Input for the chain
+            chain_input = {
+                "documents": combinedocs,
+                "query": query,
+                "memory": None,
+                "extra_documents": None,
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+            # Run it
+            response = document_chain.invoke(chain_input)
+
+            # Store sources (assuming all contributed)
+            sources = combinedocs
+
+            # Save to session and return result
+            if response:
+                st.session_state.docs_found = list({
+                    (doc.page_content, str(doc.metadata)): doc 
+                    for doc in sources
+                }.values())
+
+                # Check if the response is an instance of AIMessage
+                content = response.content if hasattr(response, 'content') else "No content available."
+
+                return content
+            else:
+                return "No relevant results found."
 
         except Exception as final_error:
+            logging.error(f"❌ Unexpected error occurred in datanalystbot: {str(final_error)}")
             import traceback
             return f"❌ Unexpected error occurred:\n```\n{traceback.format_exc()}\n```"
-
+        
 
     def Multimodalagent(self, query):
 
@@ -516,13 +639,7 @@ class unstructured_Analyzer:
             else:
                 st.warning("Please enter all the required credentials.")
 
-            
 
-        
-    
-
-
-    
     def sidebarcomponents(self):
         if st.session_state.internet_access:
             with st.sidebar.title('Analyze images'):
@@ -547,146 +664,166 @@ class unstructured_Analyzer:
                         st.session_state.description=st.text_area('Describe Data')
 
     def generateresponse(self, prompt):
-        # Ensure required session state variables exist
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-        if "internet_access" not in st.session_state:
-            st.session_state.internet_access = False
-        if "description" not in st.session_state:
-            st.session_state.description = "No description provided."
-        if "uploaded_image" not in st.session_state:
-            st.session_state.uploaded_image = None
-        if "LangGroupChain" not in st.session_state:
-            st.session_state.LangGroupChain = False
-        if "docs_found" not in st.session_state:
-            st.session_state.docs_found = []
+        # Ensure required session state keys exist
+        st.session_state.setdefault("messages", [])
+        st.session_state.setdefault("internet_access", False)
+        st.session_state.setdefault("description", "No description provided.")
+        st.session_state.setdefault("uploaded_image", None)
+        st.session_state.setdefault("LangGroupChain", False)
+        st.session_state.setdefault("docs_found", [])
 
-        # Determine task type
-        predict = self._decision(prompt)  # Ensure this function is defined
-        url_check = self.check_for_url(prompt)  # Ensure this returns a boolean
-
-        if url_check:
+        # Step 1: Decision engine
+        predict = self._decision(prompt)  # Make sure _decision() is implemented
+        if self.check_for_url(prompt):    # Returns True if URL detected
             predict = "search"
 
+        # Step 2: Log user prompt
         st.session_state.messages.append({'role': 'user', 'question': prompt})
+        message = "Sorry, I couldn't understand the prompt."
 
-        # Check for internet access
+        # Step 3: Internet-enabled response path
         if st.session_state.internet_access:
+            st.session_state.docs_found = []  # Reset docs
+
             if 'analysis' in predict:
-                with st.spinner('Your answers will be ready soon...'):
+                with st.spinner('Analyzing your data...'):
                     message = self.datanalystbot(prompt, st.session_state.description)
+
+                    # If response seems meaningful, optionally do deeper chain processing
                     if message and self.response_sentiment(message) > 0.40:
-                        with st.spinner('This might take a while...'):
-                            st.session_state.docs_found = []
+                        with st.spinner('Expanding search...'):
                             if st.session_state.LangGroupChain:
-                                message = SearchAgent(prompt)
+                                message = SearchAgent(prompt)  # Ensure this is globally available
                             else:
-                                message = self.Multimodalagent(prompt)
+                                message = self.Multimodalagent(prompt)  # Make sure this is implemented
+
+            elif 'vision' in predict and st.session_state.uploaded_image is not None:
+                st.image(st.session_state.uploaded_image, caption="Uploaded Image")  # Display uploaded image
+                with st.spinner('Analyzing image...'):
+                    message = vision(prompt)  # Ensure global vision() function is defined
+
             else:
-                if 'vision' in predict and st.session_state.uploaded_image:
-                    st.session_state.docs_found = []
-                    st.image(st.session_state.uploaded_image)  # ✅ Display uploaded image
-                    with st.spinner('Analyzing picture...'):
-                        message = vision(prompt)  # Ensure `vision()` is defined
-                else:
-                    st.session_state.docs_found = []
-                    with st.spinner('Searching...'):
-                        if st.session_state.LangGroupChain:
-                            message = SearchAgent(prompt)  # Ensure `SearchAgent()` is defined
-                        else:
-                            message = self.Multimodalagent(prompt)  # Ensure `self.Multimodalagent()` is defined
+                with st.spinner('Searching online...'):
+                    if st.session_state.LangGroupChain:
+                        message = SearchAgent(prompt)
+                    else:
+                        message = self.Multimodalagent(prompt)
+
+        # Step 4: Offline response path
         else:
-            with st.spinner('Generating answer...'):
+            with st.spinner('Generating response...'):
                 message = self.datanalystbot(prompt, st.session_state.description)
 
+        logging.info(f"LLM response: {message}")
         return message
 
 
+
     def workflow(self):
+        # Initialize session state
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        if "docs_found" not in st.session_state:
+            st.session_state.docs_found = None
+        if "vectorstoreretriever" not in st.session_state:
+            st.session_state.vectorstoreretriever = None
+
+        colored_header.colored_header("Supported LLMs", "choose your llm", color_name='blue-green-90')
         
-        colored_header.colored_header("Supported LLMs","choose your llm", color_name='blue-green-90')
-        self.llm_category=st.selectbox(label='choose llm category',options=self.config_data["llm_category"], label_visibility='collapsed')
-        if self.llm_category=='gemini models':
+        self.llm_category = st.selectbox(
+            label='choose llm category',
+            options=self.config_data["llm_category"],
+            label_visibility='collapsed'
+        )
+        
+        # Select LLMs based on category
+        if self.llm_category == 'gemini models':
             self.supported_llms = self.config_data["supported_llms"]['gemini_llms']
-        elif self.llm_category=='ollama models':
-            self.supported_llms=self.config_data["supported_llms"]['opensource_llms']
-        elif self.llm_category=='huggingface models':
-            self.supported_llms=self.config_data["supported_llms"]['huggingface_llms']
-        elif self.llm_category=='openai models':
-            self.supported_llms=self.config_data["supported_llms"]['openai_llms']
-        elif self.llm_category=='groq models':
-            self.supported_llms=self.config_data["supported_llms"]['groq_llms']
-        elif self.llm_category=='antrophic models':
-            self.supported_llms=self.config_data["supported_llms"]['antrophic_llms']
+        elif self.llm_category == 'ollama models':
+            self.supported_llms = self.config_data["supported_llms"]['opensource_llms']
+        elif self.llm_category == 'huggingface models':
+            self.supported_llms = self.config_data["supported_llms"]['huggingface_llms']
+        elif self.llm_category == 'openai models':
+            self.supported_llms = self.config_data["supported_llms"]['openai_llms']
+        elif self.llm_category == 'groq models':
+            self.supported_llms = self.config_data["supported_llms"]['groq_llms']
+        elif self.llm_category == 'antrophic models':
+            self.supported_llms = self.config_data["supported_llms"]['antrophic_llms']
+
+        # UI: LLM + temperature
         col1, col2 = st.columns(2)
         with col1:
             st.session_state.selected_llm = st.selectbox("LLMS", self.supported_llms)
         with col2:
-            st.session_state.model_temperature = st.slider('Model Temperatures', min_value=0.1, max_value=1.0, value=0.5, step=0.01)
+            st.session_state.model_temperature = st.slider(
+                'Model Temperatures', min_value=0.1, max_value=1.0, value=0.5, step=0.01
+            )
 
-        if st.toggle('Activate Internet Access',help="This will enable llm to search internet for queries"):
-            st.session_state.internet_access=True
-        else:
-            st.session_state.internet_access=False
-
-        if st.toggle('Activate LangGroupChain Experimental?',help="Works with internet accesss.Experimental chain that breaks down a problem into graph, analyzes subproblems in topological order and then responds. Might be unstable for some llms. Currently supports only gemini models."):
-            st.session_state.LangGroupChain=True
-        else:
-            st.session_state.LangGroupChain=False
-
+        # Toggle internet access and LangGroupChain
+        st.session_state.internet_access = st.toggle(
+            'Activate Internet Access',
+            help="This will enable llm to search internet for queries"
+        )
         
-        select_upload_option=option_menu(None,['Upload document','MONGO DB'], orientation="horizontal")
-        if select_upload_option=='MONGO DB':
+        st.session_state.LangGroupChain = st.toggle(
+            'Activate LangGroupChain Experimental?',
+            help="Works with internet access. Experimental chain that breaks down a problem into graph..."
+        )
+
+        # Document source selection
+        select_upload_option = option_menu(None, ['Upload document', 'MONGO DB'], orientation="horizontal")
+        
+        files = None  # Initialize
+
+        if select_upload_option == 'MONGO DB':
             self.mongoviewer()
-        elif select_upload_option=='Upload document':
-            # st.session_state.messages=[]
-            files=self._upload_pdf()
-            st.session_state.vectorstoreretriever=self._vstore_embeddings(uploaded_files=files)
-            # st.write(self._vstore_embeddings(uploaded_files=files),files)
-            # if st.session_state['uploaded_files'] is not None and st.session_state.vectorstoreretriever is None:
 
-            #     self._vstore_embeddings(uploaded_files=st.session_state['uploaded_files'])
+        elif select_upload_option == 'Upload document':
+            files = self._upload_pdf()
+            st.session_state.vectorstoreretriever = self._vstore_embeddings(uploaded_files=files)
+
+        # Show vector store info (debug)
         st.write(st.session_state.vectorstoreretriever)
-        if st.session_state.vectorstoreretriever is not None:
-                # st.write(st.session_state.messages)
-                with st.expander('Extracted Tables From Docs'):
-                    tables=self.show_extracted_tables_from_pdf(files)
-                    if tables:
-                        if len(tables)>10 or len(tables[0])>100:
-                            st.warning('Looks like we found a lot of table structures in the pdf, note that large volume of structured data is meant to be analyzed by structured section.')
-                        st.warning('Note : You can use these tables for analysis in structured section')
 
-                        for i,table in enumerate(tables):
-                            st.subheader(f'Table {i+1}', divider=True)
-                            st.data_editor(table)
-                    else:
-                        st.warning('No Tables Found')
+        if st.session_state.vectorstoreretriever is not None and files is not None:
+            # Show extracted tables
+            with st.expander('Extracted Tables From Docs'):
+                tables = self.show_extracted_tables_from_pdf(files)
+                if tables:
+                    if len(tables) > 10 or len(tables[0]) > 100:
+                        st.warning('Large number of tables detected. Consider analyzing in the Structured section.')
+                    st.warning('Note: You can use these tables for analysis in the structured section.')
 
-                for message in st.session_state.messages:
-                    with st.chat_message(message['role']):
-                        if message['role']=='user':
-                            st.write(message['question'], unsafe_allow_html=True)
-                        elif message['role']=='assistant':
-                            if self._IsGenerator(message['reply']):
-                                st.write_stream(message['reply'])
-                            elif isinstance(message['reply'],pd.DataFrame):
-                                st.dataframe(message['reply'])
+                    for i, table in enumerate(tables):
+                        st.subheader(f'Table {i+1}', divider=True)
+                        st.data_editor(table)
+                else:
+                    st.warning('No Tables Found')
 
-                            else:
-                                st.write(message['reply'], unsafe_allow_html=True)
-                        
-                if st.session_state.docs_found:
-                    with st.expander('retrived docs'):
-                        st.write(st.session_state.docs_found, unsafe_allow_html=True)
-                            
-                if prompt := st.chat_input('Ask questions', key='data_chat'):
-                    logging.info(prompt)
-                    message=self.generateresponse(prompt=prompt)
-                    st.session_state.messages.append({'role':'assistant','reply':message})
-                    logging.info(st.session_state.messages)
-                    st.rerun()
-            
+            # Display conversation
+            for message in st.session_state.messages:
+                with st.chat_message(message['role']):
+                    if message['role'] == 'user':
+                        st.write(message['question'], unsafe_allow_html=True)
+                    elif message['role'] == 'assistant':
+                        if self._IsGenerator(message['reply']):
+                            st.write_stream(message['reply'])
+                        elif isinstance(message['reply'], pd.DataFrame):
+                            st.dataframe(message['reply'])
+                        else:
+                            st.write(message['reply'], unsafe_allow_html=True)
 
+            # Show retrieved documents
+        #    if st.session_state.docs_found:
+        #        with st.expander('retrieved docs'):
+         #           st.write(st.session_state.docs_found, unsafe_allow_html=True)
+
+            # Handle chat input
+            if prompt := st.chat_input('Ask questions', key='data_chat'):
+                logging.info(prompt)
+                message = self.generateresponse(prompt=prompt)
+                st.session_state.messages.append({'role': 'assistant', 'reply': message})
+                st.rerun()
 
 
 
