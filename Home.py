@@ -55,10 +55,6 @@ def home():
         st.write(f"- [{contributor['name']}]({contributor['profile_link']})")
 
 
-    # Feedback and Support Section
-    st.header("Feedback and Support:")
-    st.write("If you have any feedback, suggestions, or need assistance, feel free to reach out to us. We're here to help you make the most of your data analysis experience.")
-
     # Disclaimer Section
     st.header("Disclaimer:")
     st.write("This tool is designed to aid the exploratory data analysis process and should not replace human judgment. It should be used by a human and should not be relied upon blindly.")
