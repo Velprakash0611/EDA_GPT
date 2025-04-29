@@ -36,7 +36,6 @@ pypdf2==1.26.0
 pillow==10.2.0
 unstructured==0.14.2
 unstructured-client==0.15.2
-# ❌ Removed: camelot-py, ghostscript, poppler-utils, pikepdf (not cloud-safe)
 
 # Streamlit + UI
 streamlit==1.37.1
